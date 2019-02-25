@@ -1,0 +1,199 @@
+USE [ECMSB]
+GO
+
+
+
+WITH CTE_botzip AS(	--Matches Zip codes to Bottler Name
+SELECT DISTINCT 
+	RIGHT('00000' + CAST(bo.[Zip] AS VARCHAR(50)),5) AS [ZipCode]
+	,z.[OwnerName]
+	,z.[SRBUFSBUName]
+	,z.[CountyName]
+FROM [TDWH].[DataStage].[STG_Amazon_MasterBottlers] AS bo
+JOIN
+[TDWH].[Common].[AmazonBottlerZipMapping] AS z
+	ON RIGHT('00000' + CAST(z.[ZipCode] AS VARCHAR(50)),5) = RIGHT('00000' + CAST(bo.[ZIP] AS VARCHAR(50)),5)
+WHERE
+	[monthyear] = @month_year
+),
+
+CTE_vppc AS(	--PPC Data
+SELECT DISTINCT
+	[ASIN]
+	,[Title]
+	,[Brand]
+	,[Product Group]
+	,[Beverage Category]
+	,[Units per Case]
+	,[Profit Per Unit]
+	,[Profit Per Case]
+FROM [ECMSB].[dbo].[MH_Variable_PPC_ASIN_V2]	
+),
+
+CTE_botzipjoin AS(	--Joins Bottler Zip to ASIN's
+SELECT DISTINCT
+	bot.[OwnerName]
+	,bot.[SRBUFSBUName]
+	,RIGHT('00000' + CAST(bot.[ZipCode] AS VARCHAR(50)),5) AS [ZipCode]
+	,a.[City]
+	,bot.[CountyName] AS [County]
+	,a.[ASIN]
+	,a.[ShippedRevenue]
+	,a.[ShippedUnits]
+FROM
+	CTE_botzip AS bot
+INNER JOIN
+	[TDWH].[DataStage].[STG_Amazon_MasterBottlers] AS a 
+		ON RIGHT('00000' + CAST(a.[Zip] AS VARCHAR(50)),5) = RIGHT('00000' + CAST(bot.[ZipCode] AS VARCHAR(50)),5)
+WHERE
+	a.[monthyear] = @month_year
+),
+
+CTE_money AS(	--Joins ASIN sales data to Bottlers
+SELECT DISTINCT
+	b.[OwnerName]
+	,b.[SRBUFSBUName]
+	,b.[County]
+	,CAST(b.[ZipCode] AS VARCHAR(50)) AS [ZipCode]
+	,b.[City]
+	,v.[ASIN]
+	,v.[Title]
+	,v.[Brand]
+	,v.[Beverage Category]
+	,v.[Product Group]
+	,v.[Units per Case]
+	,v.[Profit Per Unit]
+	,v.[Profit Per Case]
+	,b.[ShippedRevenue]
+	,b.[ShippedUnits]
+	,SUM(b.[ShippedUnits]/v.[Units per Case]) AS [Shipped Cases]
+FROM CTE_botzipjoin AS b
+JOIN CTE_vppc AS v
+	ON v.[ASIN] = b.[ASIN]
+GROUP BY
+	b.[OwnerName]
+	,b.[SRBUFSBUName]
+	,b.[County]
+	,b.[ZipCode]
+	,b.[City]
+	,v.[ASIN]
+	,v.[Title]
+	,v.[Brand]
+	,v.[Beverage Category]
+	,v.[Product Group]
+	,v.[Units per Case]
+	,v.[Profit Per Unit]
+	,v.[Profit Per Case]
+	,b.[ShippedRevenue]
+	,b.[ShippedUnits]
+),
+
+CTE_sums AS(  --Initial Calculations
+SELECT DISTINCT
+	[OwnerName]
+	,[SRBUFSBUName]
+	,[County]
+	,[ZipCode]
+	,[City]
+	,[ASIN]
+	,[Title]
+	,[Brand]
+	,[Beverage Category]
+	,[Product Group]
+	,[Profit Per Unit]
+	,SUM([ShippedRevenue]) AS [Total Retail Sales]
+	,SUM([ShippedUnits]) AS [Total Shipped Units]
+	,[Units per Case]
+	,SUM([Shipped Cases]) AS [Total Shipped Cases]
+	,[Profit per Case] AS [Variable Profit per Case]
+FROM CTE_money
+GROUP BY
+	[OwnerName]
+	,[SRBUFSBUName]
+	,[County]
+	,[ZipCode]
+	,[City]
+	,[ASIN]
+	,[Title]
+	,[Brand]
+	,[Beverage Category]
+	,[Product Group]
+	,[Profit Per Unit]
+	,[Units per Case]
+	,[Profit per Case]
+),
+
+CTE_Profit_0 AS (
+SELECT DISTINCT  --Sums Total Variable Profit
+	
+	[Title]
+	,[Brand]
+	,[Beverage Category]
+	,[ASIN]
+	,[Product Group]
+	,[City]
+	,[ZipCode]
+	,SUM(NULLIF([Total Retail Sales],0)/NULLIF([Total Shipped Units],0)) AS [Average Shipped Price]
+	,[Total Retail Sales] AS [Shipped Amount]
+	,[Total Shipped Units] AS [Shipped Units]
+	,[Units per Case]
+	,[Total Shipped Cases] AS [Shipped Cases]
+	,[Profit Per Unit]
+	,[Variable Profit per Case] AS [Profit Per Case]
+	,SUM([Variable Profit per Case] * [Total Shipped Cases]) AS [Order Profit]
+	,[OwnerName]
+	,[SRBUFSBUName]
+	,[County] As [County Name]
+	,@month_year AS [Reporting Month]
+	
+FROM
+	CTE_sums
+GROUP BY
+	[OwnerName]
+	,[SRBUFSBUName]
+	,[ZipCode]
+	,[County]
+	,[City]
+	,[ASIN]
+	,[Title]
+	,[Brand]
+	,[Beverage Category]
+	,[Product Group]
+	,[Total Retail Sales]
+	,[Total Shipped Units]
+	,[Units per Case]
+	,[Total Shipped Cases]
+	,[Profit Per Unit]
+	,[Variable Profit per Case]
+)
+
+SELECT DISTINCT
+	
+	'Amazon' AS [Customer]
+	,[Title]
+	,[Brand]
+	,[Beverage Category]
+	,[ASIN]
+	,[Product Group]
+	,[City]
+	,[ZipCode]
+	,[Average Shipped Price]
+	,[Shipped Amount]
+	,[Shipped Units]
+	,[Units per Case]
+	,[Shipped Cases]
+	,[Profit Per Unit]
+	,[Profit Per Case]
+	,[Order Profit]
+	,[OwnerName]
+	,[SRBUFSBUName]
+	,[County Name]
+	,[Reporting Month]
+	
+FROM
+	CTE_Profit_0
+WHERE
+	[Order Profit] > 0
+
+
+
