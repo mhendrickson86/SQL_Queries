@@ -1,0 +1,57 @@
+
+WITH CTE_JOINIT AS(
+
+SELECT DISTINCT
+	Sales.[ASIN]
+	,Sales.[Product Title]
+	,Sales.[Shipped Units]
+	,Sales.[Date]
+	,wiser.[stock_status]
+	,health.[Sellable_On_Hand_units]
+	,po.[deliveryDate]
+	,po.expectedDate
+	,po.orderDate
+	,po.receivedUnits
+
+FROM [ECMSB].[dbo].[TC_DailySales_SR] AS sales
+LEFT OUTER JOIN [ECMSB].[dbo].[TC_WiserData] AS wiser
+	ON sales.[ASIN] = wiser.[ASIN] AND sales.[date] = wiser.[date]
+LEFT OUTER JOIN [ECMSB].[dbo].[TC_DailyInventoryHealth] AS health
+	ON sales.[ASIN] = health.[ASIN] AND sales.[date] = health.[Date]
+LEFT OUTER JOIN [ECMSB].[dbo].[rd_po_history] AS po
+	ON sales.[ASIN] = po.[ASIN] AND sales.[date] = po.[deliveryDate]
+--ORDER BY sales.[ASIN], sales.[date]
+	),
+
+CTE_2 AS (
+SELECT TOP 10000000
+	[ASIN]
+	,[Product Title]
+	,[Shipped Units]
+	,[Date]
+	,[stock_status]
+	,[Sellable_On_Hand_units]
+	,[deliverydate]
+	,[expectedDate]
+	,[orderDate]
+	,[receivedUnits]
+
+FROM CTE_JOINIT
+	)
+
+SELECT
+	cte.[ASIN]
+	,cte.[Product Title]
+	,cte.[Shipped Units]
+	,cte.[Date]
+	,cte.[stock_status]
+	,cte.[Sellable_On_Hand_units]
+	,cte.[deliverydate]
+	,cte.[expectedDate]
+	,cte.[orderDate]
+	,cte.[receivedUnits]
+	,asin.[ispepsiproduct]
+FROM cte_2 AS cte
+INNER JOIN [TDWH].[Common].[ASINhierarchyview] AS asin
+	ON asin.[asin] = cte.[asin]
+WHERE asin.[ispepsiproduct] = 1
