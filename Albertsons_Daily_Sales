@@ -1,0 +1,29 @@
+/* Aggregates Total Sales broken out by day by UPC
+RunTime ~:15-:20 */
+
+SELECT 
+	'Albertsons' AS [Customer]
+	,a.[BU]
+	,a.[PepsiBrand]
+	,a.[UPC]
+	,u.[UPCName]
+	--,d.[PeriodNumber]
+	,a.[ActivityDay] AS [Date]
+	,SUM(CAST(a.[NETAmount] AS FLOAT)) AS [Total Sales]
+FROM [TDWH].[DataStage].[STG_Albertsons_MasterSales] AS a
+JOIN [TDWH].[Common].[DateDimensionView] AS d ON d.[datevalue] = a.[activityday]
+JOIN [TDWH].[Common].[UPCMaster] AS u ON u.[UPC] = a.[UPC]
+WHERE --d.[yearnumber] = 2019
+	d.[DateValue] >= '2019-01-01'
+		AND a.[PepsiBrand] IS NOT NULL
+			AND a.[PepsiBrand] <> '<UnAssigned>'
+GROUP BY
+	a.[BU]
+	,a.[PepsiBrand]
+	,a.[UPC]
+	,u.[UPCName]
+	--,d.[PeriodNumber]
+	,a.[ActivityDay]
+ORDER BY
+	--d.[PeriodNumber]
+	a.[ActivityDay]
