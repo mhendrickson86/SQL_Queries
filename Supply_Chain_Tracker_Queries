@@ -1,0 +1,79 @@
+/****************START Queries for Quaker START************************/
+
+DECLARE @maxdate AS DATE
+SET @maxdate = (SELECT MAX(orderdate) AS [MaxOrderDate]
+				FROM [ECMSB].[dbo].[rd_po_history])
+SELECT
+	 po.[accepted]
+      ,po.[asin]
+      ,po.[caseSize]
+      ,po.[condition]
+      ,po.[cost]
+      ,po.[cost_currencyCode]
+      ,po.[deliveryDate]
+      ,po.[deliveryDateOriginal]
+      ,po.[deliveryWindowEnd]
+      ,po.[deliveryWindowStart]
+      ,po.[expectedDate]
+      ,po.[expectedDateType]
+      ,po.[externalId]
+      ,po.[id]
+      ,po.[isBackordered]
+      ,po.[modelNumber]
+      ,po.[orderId]
+      ,po.[orderId_linkType]
+      ,po.[poId]
+      ,po.[receivedUnits]
+      ,po.[remainingUnits]
+      ,po.[shipDate]
+      ,po.[shipDateOrigial]
+      ,po.[shipWindowEnd]
+      ,po.[shipWindowStart]
+      ,po.[submitted]
+      ,po.[title]
+      ,po.[totalCost]
+      ,po.[totalCost_currencyCode]
+      ,po.[vendorCode]
+      ,po.[vendorExternalId]
+      ,po.[warehouse]
+      ,po.[orderDate]
+      --,asin.[BU]
+ FROM [ECMSB].[dbo].[rd_po_history] AS po
+	LEFT JOIN [TDWH].[Common].[AsinHierarchyView] AS asin
+		ON asin.[asin] = po.[asin]
+ WHERE
+	po.[orderdate] BETWEEN DATEADD(WEEK,-8,@maxdate) AND @maxdate 
+		AND asin.[bu] = 'Quaker'
+ORDER BY
+	po.[orderDate]
+
+-----------------------------------------
+DECLARE @maxdate AS DATE
+SET @maxdate = (SELECT MAX([date]) AS [MaxDate]
+				FROM [ECMSB].[dbo].[TC_DailyInventoryForecast])
+
+
+SELECT inv.*
+FROM [ECMSB].[dbo].[TC_DailyInventoryForecast] AS inv
+LEFT JOIN [TDWH].[Common].[AsinHierarchyView] AS asin
+	ON asin.[asin] = inv.[asin]
+WHERE
+	[Date] BETWEEN DATEADD(WEEK,-1,@maxdate) AND @maxdate 
+	AND asin.[BU] = 'Quaker'
+ORDER BY inv.[Date]
+
+--------------------------------------------
+DECLARE @maxdate AS DATE
+SET @maxdate = (SELECT MAX([date]) AS [MaxDate]
+				FROM [ECMSB].[dbo].[LT_WeeklyForecast])
+
+SELECT inv.*
+FROM [ECMSB].[dbo].[LT_WeeklyForecast] AS inv
+LEFT JOIN [TDWH].[Common].[AsinHierarchyView] AS asin
+	ON asin.[asin] = inv.[asin]
+WHERE inv.[Date] = @maxdate 
+	AND asin.[BU] = 'Quaker'
+ORDER BY inv.[Date] DESC
+
+/****************END Queries for Quaker END************************/
+
