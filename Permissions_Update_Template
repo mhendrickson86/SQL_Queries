@@ -1,0 +1,40 @@
+SELECT MAX([employee_id])
+FROM [TDWH].[UserSec].[Sec_EmployeeMaster]
+
+INSERT INTO [TDWH].[UserSec].[Sec_EmployeeMaster]
+   ([firstName], [lastName], [employee_id], [gpid])
+VALUES
+   ('Daniel', 'Lederman', 432, '80165638')
+
+/*****************************************/
+
+SELECT 
+	[permissionId]
+    ,[employee_Id]
+FROM [TDWH].[UserSec].[Sec_Fact_EmployeePermissionRel]
+WHERE employee_Id = 286
+
+INSERT INTO [TDWH].[UserSec].[Sec_Fact_EmployeePermissionRel]
+   ([permissionId], [employee_Id])
+VALUES
+   (1, 432)
+   ,(2, 432)
+   ,(3, 432)
+   ,(4, 432)
+   ,(5, 432)
+   ,(6, 432)
+   ,(7, 432)
+   ,(8, 432)
+   ,(9, 432)
+   ,(10, 432)
+   ,(11, 432)
+   ,(12, 432)
+   ,(13, 432)
+   ,(14, 432)
+   ,(15, 432)
+   ,(36, 432)
+   ,(37, 432)
+   ,(38, 432)
+   ,(39, 432)
+   ,(40, 432)
+   ,(41, 432)
