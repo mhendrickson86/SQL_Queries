@@ -1,0 +1,351 @@
+
+/* Pulls all ASINs contained in the search teams active campaign list */
+WITH CTE_ASINList AS(
+SELECT DISTINCT 
+	[ASIN]
+FROM [ECMSB].[dbo].[MH_SearchAsinList]
+WHERE [status] = 'AD_STATUS_LIVE'
+),
+
+/* Pulls in stock status data from keepa scraper for relevant search team ASINs */
+CTE_keepa AS(
+SELECT DISTINCT 
+    oos.[ASIN]
+    ,oos.[Activity_Day]
+    ,oos.[% OOS] AS [Stock_Status]
+   
+FROM [ECMSB].[dbo].[rdOOS] AS oos
+INNER JOIN CTE_ASINList AS list
+	ON oos.[ASIN] = list.[asin]
+WHERE oos.[Activity_Day] >= '2018-11-01'
+		
+),
+
+/* Pulls purchase order data for ASINs specified in the search team's active campaigns list */
+
+CTE_POData AS(
+SELECT DISTINCT
+    po.[ASIN]
+	,po.[orderDate]
+	,SUM(CAST(po.[submitted] AS INT)) AS [SubmittedUnits]
+FROM [ECMSB].[dbo].[rd_po_history] AS po
+INNER JOIN CTE_ASINList AS list
+	ON po.[asin] = list.[ASIN]
+GROUP BY 
+    po.[ASIN]
+	,po.[orderDate]
+
+),
+
+CTE_SalesOrderedSum AS( --Pulls units/sales
+SELECT DISTINCT
+    sales.[ASIN]
+    ,sales.[Product Title]
+    ,sales.[Date]
+	--,list.[BU]
+    ,CAST(sales.[Ordered Units] AS INT) AS [Ordered units]
+	,CAST(sales.[Shipped Revenue] AS FLOAT) AS [ShippedRevenue]
+FROM [ECMSB].[dbo].[TC_DailySales_SR] AS sales
+INNER JOIN CTE_ASINList AS list
+	ON sales.[ASIN] = list.[ASIN] 
+
+),
+/* Nulls out 0 Submitted Units */
+CTE_MasterASINJoin AS(
+
+SELECT DISTINCT
+    Sales.[ASIN]
+    ,Sales.[Product Title]
+    ,CAST(sales.[ordered units] AS INT) AS [Ordered units]
+	,CAST(sales.[ShippedRevenue] AS FLOAT) AS [ShippedRevenue]
+    ,Sales.[Date]
+    ,oos.[Stock_Status]
+	,health.[Sellable_On_Hand_Units]
+	,health.[Unsellable_On_Hand_Units]
+	,po.[orderDate]
+	,CASE
+		WHEN po.[SubmittedUnits] = 0
+		THEN NULL
+		ELSE po.[SubmittedUnits]
+		END AS [SubmittedUnits]
+    
+FROM CTE_SalesOrderedSum AS sales
+	INNER JOIN [CTE_keepa] AS oos --Joins scorecard specific .COM ASINs
+		ON sales.[ASIN] = oos.[ASIN] 
+		AND sales.[date] = oos.[Activity_Day]
+	LEFT OUTER JOIN [ECMSB].[dbo].[TC_DailyInventoryHealth] AS health --Joins Sellable units data
+		ON sales.[ASIN] = health.[ASIN] 
+		AND sales.[date] = health.[Date]
+	LEFT OUTER JOIN CTE_POData AS po --Joins PO window start data
+		ON sales.[ASIN] = po.[ASIN]
+		AND sales.[Date] = po.[orderDate] -------------ORDER VS DELIVERY
+
+WHERE sales.[Date] >= '2019-01-01'
+    ),
+		
+/* Calculates [Trailing_10d_Order_Avg] */
+CTE_UnifyOrderedUnits AS(
+
+SELECT DISTINCT
+    [ASIN]
+    ,[Product Title]
+    ,[ordered units]
+	,[ShippedRevenue]
+    ,AVG(CAST([Ordered Units] AS FLOAT)) OVER
+		(
+		PARTITION BY [ASIN]
+        ORDER BY [ASIN], [date] ASC
+        ROWS BETWEEN 10 PRECEDING AND CURRENT ROW
+		) AS [Trailing_10d_Order_Avg]
+    ,[Date]
+    ,[stock_status]
+	,[Sellable_On_Hand_Units]
+	,[Unsellable_On_Hand_Units]
+	,[SubmittedUnits]
+	,[orderDate]
+FROM CTE_MasterASINJoin
+),
+
+/* Calculates [DaysOfSupplyLeft] and [Sell_Thru_Rate_AvgUnit] */
+CTE_SellThru AS( 
+
+SELECT  
+    [ASIN]
+    ,[Product Title]
+    ,[Date]
+	,[Sellable_On_Hand_Units]
+	,[Unsellable_On_Hand_Units]
+	,[SubmittedUnits]
+	,[orderDate]
+    ,[ordered units]
+    ,[Trailing_10d_Order_Avg]
+	,[Sellable_On_Hand_Units] / NULLIF([Trailing_10d_Order_Avg], 0) AS [DaysOfSupplyLeft]
+	,[ShippedRevenue]
+    ,CASE
+		WHEN ([Trailing_10d_Order_Avg] / NULLIF([Sellable_On_Hand_Units], 0)) IS NULL
+		THEN 0
+		WHEN ([Trailing_10d_Order_Avg] / NULLIF([Sellable_On_Hand_Units], 0)) < 0
+		THEN 0
+		ELSE ([Trailing_10d_Order_Avg] / NULLIF([Sellable_On_Hand_Units], 0))
+		END AS [Sell_Thru_Rate_AvgUnit] 
+    ,[stock_status]
+
+FROM CTE_UnifyOrderedUnits
+
+),
+
+/* Calculates [Trailing_5d_Sell_Thru] */
+CTE_Last AS(
+
+SELECT  
+    [ASIN]
+    ,[Product Title]
+    ,[Date]
+	,[Sellable_On_Hand_Units]
+	,[DaysOfSupplyLeft]
+	,CASE
+		WHEN [DaysOfSupplyLeft] <= 10
+		THEN 1
+		ELSE 0
+		END AS [<10dSupply]
+	,[Unsellable_On_Hand_Units]
+	,[SubmittedUnits]
+	,[orderDate]
+    ,[ordered units]
+    ,[Trailing_10d_Order_Avg]
+	,[ShippedRevenue]
+    ,[Sell_Thru_Rate_AvgUnit] 
+	,AVG([Sell_Thru_Rate_AvgUnit]) OVER
+		(
+			PARTITION BY [ASIN]
+			ORDER BY [ASIN], [date] ASC
+			ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+        ) AS [Trailing_5d_Sell_Thru]
+    ,[stock_status]
+FROM CTE_SellThru
+
+),
+
+/* Calculates [Trailing_5d_Inventory] and [OOS_Anamoly]
+   Also uses a self join to mark 9d PO windows */
+CTE_ExistRoll AS(
+SELECT DISTINCT
+    a.[ASIN]
+    ,a.[Product Title]
+    ,a.[Date]
+	,a.[Sellable_On_Hand_Units]
+	,a.[DaysOfSupplyLeft]
+	,a.[Unsellable_On_Hand_Units]
+    ,AVG(CAST(a.[Sellable_On_Hand_Units] AS FLOAT)) OVER
+        (
+            PARTITION BY a.[ASIN]
+            ORDER BY a.[ASIN], a.[date] ASC
+            ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+        ) AS [Trailing_5d_Inventory]
+
+	,CASE --Flags OOS Events that are not related to low Inventory
+        WHEN 
+			a.[stock_status] >= .25
+			AND a.[Sell_Thru_Rate_AvgUnit] < .1
+			AND a.[Ordered units] <> 0 
+			AND ((
+				a.[Sellable_On_Hand_Units] !< (a.[Trailing_10d_Order_Avg] * .4)
+					)
+					OR (a.[Sellable_On_Hand_Units] > a.[Trailing_10d_Order_Avg])
+					)
+		THEN 1
+		ELSE 0
+		END AS [OOS_Anamoly]
+
+	,a.[SubmittedUnits]
+	,a.[orderDate]
+    ,a.[ordered units]
+    ,a.[Trailing_10d_Order_Avg]
+	,a.[ShippedRevenue]
+    ,a.[Trailing_5d_Sell_Thru]
+    ,a.[Sell_Thru_Rate_AvgUnit]
+    ,a.[stock_status]
+	,a.[<10dSupply]
+	,MAX(ISNUMERIC(b.[SubmittedUnits])) AS [9d_PO_Window]    
+FROM CTE_Last AS a
+LEFT OUTER JOIN CTE_Last AS b
+    ON a.[ASIN] = b.[ASIN] 
+    AND a.[Date] BETWEEN b.[date] and DATEADD(day, 8, b.[Date] ) --PO Date Range
+GROUP BY
+    a.[ASIN]
+    ,a.[Product Title]
+    ,a.[Date]
+	,a.[Sellable_On_Hand_Units]
+	,a.[DaysOfSupplyLeft]
+	,a.[Unsellable_On_Hand_Units]
+	,a.[SubmittedUnits]
+	,a.[orderDate]
+    ,a.[ordered units]
+    ,a.[Trailing_10d_Order_Avg]
+	,a.[ShippedRevenue]
+    ,a.[Trailing_5d_Sell_Thru]
+    ,a.[Sell_Thru_Rate_AvgUnit]
+    ,a.[stock_status]
+	,a.[<10dSupply]
+),
+
+/* Calculates [LastPoDate], [UnitsOnPo], and [Trailing_5d_Revenue]
+   Also flags propable OOS events */
+CTE_ProbCalc AS(
+
+SELECT DISTINCT
+    [ASIN]
+    ,[Product Title]
+    ,[Date]
+	,[Sellable_On_Hand_Units]
+	,[DaysOfSupplyLeft]
+	,[Unsellable_On_Hand_Units]
+    ,[Trailing_5d_Inventory]
+	,[9d_PO_Window] 
+	,[SubmittedUnits]
+	,[orderDate]
+	,MAX([orderDate]) OVER --Pulls MAX Orderdate in prior 30d period
+		(
+		PARTITION BY [ASIN]
+        ORDER BY [ASIN], [date] ASC
+        ROWS BETWEEN 30 PRECEDING AND CURRENT ROW
+        ) AS [LastPoDate]
+	,MAX([SubmittedUnits]) OVER
+		(
+		PARTITION BY [ASIN]
+        ORDER BY [ASIN], [date] ASC
+        ROWS BETWEEN 9 PRECEDING AND CURRENT ROW
+		) AS [UnitsOnPo] ------------What date range?
+
+    ,[ordered units]
+    ,[Trailing_10d_Order_Avg]
+	,[ShippedRevenue]
+	,AVG([ShippedRevenue]) OVER
+		(
+		PARTITION BY [ASIN]
+		ORDER BY [ASIN], [Date]
+		ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+		) AS [Trailing_5d_Revenue]
+    ,[Trailing_5d_Sell_Thru]
+    ,[Sell_Thru_Rate_AvgUnit]
+    ,[stock_status]
+	,[<10dSupply]
+
+	,CASE 
+		WHEN 
+			(
+			(
+			[Sellable_On_Hand_Units] <= [Trailing_5d_Inventory] * .5
+			AND (
+				([Sell_Thru_Rate_AvgUnit] >= .5
+				OR
+				[Trailing_5d_Sell_Thru] >= .2
+				)
+			)
+			)
+		OR(
+			[Sellable_On_Hand_Units] <= 15
+			AND
+			[Sell_Thru_Rate_AvgUnit] >= .2
+		   )
+		   )
+		AND ([9d_PO_Window] = 0 OR [9d_PO_Window] IS NULL)
+		AND [OOS_Anamoly] = 0
+		AND [stock_status] <> 1
+		THEN 1
+		ELSE 0
+		END AS [oosProb_PO2]
+	,[OOS_Anamoly]
+
+FROM CTE_ExistRoll
+),
+
+/* Caculates [ExpectedReplenishmentDate], [LowPo], and [LowSupplyNoPo] */
+CTE_masterQuery AS(
+
+SELECT
+	[ASIN]
+    ,[Product Title]
+    ,[Date]
+	,[Sellable_On_Hand_Units] AS [SellableUnits]
+    ,CAST([Trailing_5d_Inventory] AS DECIMAL(10,2)) AS [Trailing_5d_Inventory]
+	,CAST([DaysOfSupplyLeft] AS DECIMAL(10,2)) AS [DaysOfSupplyLeft]	
+	,[ShippedRevenue]
+	,[9d_PO_Window] 
+	,[SubmittedUnits]
+	,CAST(CONVERT(DATE,DATEADD(DAY, 9, [LastPoDate]),101) AS VARCHAR(50)) AS [ExpectedReplenishmentDate]
+	,[LastPoDate]
+	,[ordered units] AS [SoldUnits]
+	,[UnitsOnPo]
+    ,CAST([Trailing_10d_Order_Avg] AS DECIMAL(6,2)) AS [Trailing_10d_Order_Avg]
+	,CASE
+		WHEN [UnitsOnPo] < [Trailing_10d_Order_Avg]
+		THEN 1
+		ELSE 0
+		END AS [LowPo]
+    ,[stock_status]
+	,[oosProb_PO2] AS [OOS_Probable]
+	,[<10dSupply]
+	,CAST(CASE
+		WHEN [<10dSupply] = 1 AND [9d_PO_Window] = 0
+		THEN 1
+		ELSE 0
+		END AS DECIMAL(10,2)) AS [LowSupplyNoPo]
+    ,[OOS_Anamoly]
+	
+FROM CTE_ProbCalc
+--WHERE [Date] >= '2019-01-01'
+
+)
+
+SELECT *
+FROM CTE_masterQuery
+WHERE DATEPART(MONTH, [Date]) = (
+								SELECT MAX(DATEPART(MONTH,[DATE]))
+								FROM CTE_masterQuery
+								)
+   AND DATEPART(YEAR, [Date]) = (
+								SELECT MAX(DATEPART(YEAR, [Date]))
+								FROM CTE_masterQuery
+								)
+ORDER BY [asin], [date]
